@@ -1,0 +1,132 @@
+name: Dispatch Build → ACR
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch to build from
+        required: true
+        default: # put default branch here, e.g. master or dev
+      reason:
+        description: Why rebuild?
+        required: false
+        default: monthly refresh
+
+env:
+  REGISTRY_LOGIN_SERVER: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+  REGISTRY_USERNAME:     ${{ secrets.REGISTRY_USERNAME }}
+  REGISTRY_PASSWORD:     ${{ secrets.REGISTRY_PASSWORD }}
+
+  ACR_NAME:              acxcr
+  ACR_REPOSITORY:        # put repository name here
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Azure CLI login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.REGISTRY_LOGIN_SERVER }}
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+
+      - name: Compute tag 
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BRANCH="${{ inputs.ref }}"                      
+          BRANCH_LC="$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]')"
+          REAL_SHA="$(git rev-parse --short=7 HEAD)"      
+
+          BASE_PREFIX="${BRANCH_LC}-${REAL_SHA}"          
+
+          echo "Branch:      $BRANCH"
+          echo "Short SHA:   $REAL_SHA"
+          echo "Base prefix: $BASE_PREFIX"
+
+          echo "Looking up latest tag in ACR for branch prefix '${BRANCH_LC}-'..."
+
+          LATEST_TAG=$(
+            az acr repository show-tags \
+              -n "$ACR_NAME" \
+              --repository "$ACR_REPOSITORY" \
+              --orderby time_desc \
+              -o tsv 2>/dev/null | \
+            grep "^${BRANCH_LC}-" | head -1 || true
+          )
+
+          echo "Latest tag in ACR for branch ${BRANCH_LC}: '${LATEST_TAG:-<none>}'"
+
+          NEW_TAG=""
+
+          if [[ -z "$LATEST_TAG" ]]; then
+            NEW_TAG="$BASE_PREFIX"
+            echo "No existing branch tags; using base tag: $NEW_TAG"
+          else
+            REST="${LATEST_TAG#${BRANCH_LC}-}"   
+
+            LAST_SHA="${REST%%-v*}"              
+
+            echo "Last tag SHA for this branch: $LAST_SHA"
+
+            if [[ "$LAST_SHA" != "$REAL_SHA" ]]; then
+              NEW_TAG="$BASE_PREFIX"
+              echo "Commit changed; using new base tag: $NEW_TAG"
+            else
+              if [[ "$LATEST_TAG" =~ ^${BASE_PREFIX}-v([0-9]+)$ ]]; then
+                N="${BASH_REMATCH[1]}"
+                NEXT=$((N + 1))
+              else
+                NEXT=2
+              fi
+
+              NEW_TAG="${BASE_PREFIX}-v${NEXT}"
+              echo "Same commit; bumping version: $NEW_TAG"
+            fi
+          fi
+
+          echo "Final tag: $NEW_TAG"
+
+          echo "BRANCH=$BRANCH"     >> "$GITHUB_ENV"
+          echo "REAL_SHA=$REAL_SHA" >> "$GITHUB_ENV"
+          echo "TAG=$NEW_TAG"       >> "$GITHUB_OUTPUT"
+
+      - name: Build & push image
+        run: |
+          set -euo pipefail
+
+          docker build . --pull \
+            --build-arg GH_USER=${{ secrets.GH_USER }} \
+            --build-arg GH_KEY=${{ secrets.GH_KEY }} \
+            --label org.opencontainers.image.created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label org.opencontainers.image.revision="${REAL_SHA}" \
+            --label org.opencontainers.image.source-branch="${BRANCH}" \
+            -t "${REGISTRY_LOGIN_SERVER}/${{ env.ACR_REPOSITORY }}:${{ steps.meta.outputs.TAG }}"
+
+          docker push "${REGISTRY_LOGIN_SERVER}/${{ env.ACR_REPOSITORY }}:${{ steps.meta.outputs.TAG }}"
+
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
+            "${REGISTRY_LOGIN_SERVER}/${{ env.ACR_REPOSITORY }}:${{ steps.meta.outputs.TAG }}")
+
+          echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Image pushed"
+            echo "- Branch: \`${BRANCH}\`"
+            echo "- Commit: \`${REAL_SHA}\`"
+            echo "- Tag:    \`${{ steps.meta.outputs.TAG }}\`"
+            echo "- Digest: \`${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
