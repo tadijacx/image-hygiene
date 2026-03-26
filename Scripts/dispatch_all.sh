@@ -12,10 +12,10 @@ ACR_NAME="${ACR_NAME:-acxcr}"
 
 # Mapping CSV 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-MAP_FILE="${MAP_FILE:-${REPO_ROOT}/Maps/lookup-service-non-ml.csv}"
+MAP_FILE="${MAP_FILE:-${REPO_ROOT}/Maps/lookup-service.csv}"
 
 # Age threshold to consider stale
-STALE_DAYS="${STALE_DAYS:-30}"
+STALE_DAYS="${STALE_DAYS:-20}"
 
 # 1 = print 0 = actually dispatch 
 DRY_RUN="${DRY_RUN:-1}"

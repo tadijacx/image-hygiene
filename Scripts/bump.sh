@@ -18,7 +18,7 @@ ACR_NAME="${ACR_NAME:-acxcr}"
 DEVOPS_REPO="${DEVOPS_REPO:-beacx/acx-kubernetes-app}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-MAP_FILE="${MAP_FILE:-${REPO_ROOT}/Maps/lookup-service-non-ml.csv}"
+MAP_FILE="${MAP_FILE:-${REPO_ROOT}/Maps/lookup-service.csv}"
 
 # Bump behavior
 DRY_RUN="${DRY_RUN:-0}"          # 1 = no changes/PR, 0 = create PR

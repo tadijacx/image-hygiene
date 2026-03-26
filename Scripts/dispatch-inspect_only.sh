@@ -7,10 +7,10 @@ ACR_NAME="${ACR_NAME:-acxcr}"
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 # Which lookup CSV to use
-MAP_FILE="${MAP_FILE:-${REPO_ROOT}/lookup_service-2repotest.csv}"
+MAP_FILE="${MAP_FILE:-${REPO_ROOT}/Maps/lookup-service.csv}"
 
 # Age threshold 
-STALE_DAYS="${STALE_DAYS:-30}"
+STALE_DAYS="${STALE_DAYS:-20}"
 
 require() { command -v "$1" >/dev/null 2>&1 || { echo "❌ Missing '$1' in PATH"; exit 1; }; }
 

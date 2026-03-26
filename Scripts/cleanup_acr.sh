@@ -7,7 +7,7 @@ DEVOPS_REPO="${DEVOPS_REPO:-beacx/acx-kubernetes-app}"
 
 # Mapping CSV
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-MAP_FILE="${MAP_FILE:-${REPO_ROOT}/Maps/lookup_service-dev.csv}"
+MAP_FILE="${MAP_FILE:-${REPO_ROOT}/Maps/lookup-service.csv}"
 
 # How many tags per env to keep (current + backups)
 KEEP_COUNT="${KEEP_COUNT:-3}"
@@ -213,6 +213,11 @@ git fetch origin "$K8S_BRANCH_DEVLIKE" >/dev/null 2>&1 || true
 git fetch origin "$K8S_BRANCH_DEV_EASTUS" >/dev/null 2>&1 || true
 git fetch origin "$K8S_BRANCH_PRODLIKE" >/dev/null 2>&1 || true
 
+# Flat file used in place of an associative array (bash 3.2 compat).
+# Each line: "<acr_repo>::<prefix> <tag>"
+PROTECTED_MAP_FILE="${WORKDIR}/protected_map.txt"
+touch "$PROTECTED_MAP_FILE"
+
 # Helper: read the "current tag" for a chart from a given branch ref,
 # using a mode-specific values-file preference.
 read_tag_for_branch() {
@@ -330,35 +335,33 @@ cleanup_for_mode() {
 
     echo "   • Found ${#ALL_TAGS[@]} tags for ${ACR_REPO} with prefix '${DERIVED_PREFIX}-'"
 
-        # ---- PROTECTED tags (ALWAYS init; safe under set -u) ----
+        # ---- PROTECTED tags — sourced from cross-row pre-scan ----
+    # All tags referenced by ANY row sharing this (acr_repo, prefix) across all
+    # k8s branches are protected, preventing one row's cleanup from deleting a
+    # tag that another chart for the same ACR repo is still using.
     local -a PROTECTED
     PROTECTED=()
 
     add_protected() {
       local val="$1"
       [[ -z "$val" ]] && return 0
-
-      # If PROTECTED has entries, enforce uniqueness
       if (( ${#PROTECTED[@]} > 0 )); then
         local x
         for x in "${PROTECTED[@]}"; do
           [[ "$x" == "$val" ]] && return 0
         done
       fi
-
       PROTECTED+=("$val")
     }
 
-    # Always protect CURRENT_TAG if it matches the prefix-set we are cleaning
-    [[ "$CURRENT_TAG" == "${DERIVED_PREFIX}-"* ]] && add_protected "$CURRENT_TAG"
-
-    # Protect other branches IF they share the same prefix
-    [[ -n "${TAG_PROD:-}"   && "$TAG_PROD"   == "${DERIVED_PREFIX}-"* ]] && add_protected "$TAG_PROD"
-    [[ -n "${TAG_DEV:-}"    && "$TAG_DEV"    == "${DERIVED_PREFIX}-"* ]] && add_protected "$TAG_DEV"
-    [[ -n "${TAG_EASTUS:-}" && "$TAG_EASTUS" == "${DERIVED_PREFIX}-"* ]] && add_protected "$TAG_EASTUS"
+    local map_key="${ACR_REPO}::${DERIVED_PREFIX}"
+    local pt
+    while IFS= read -r pt; do
+      [[ -n "$pt" ]] && add_protected "$pt"
+    done < <(awk -v k="${map_key}" '$1 == k {print $2}' "$PROTECTED_MAP_FILE" 2>/dev/null || true)
 
     if (( ${#PROTECTED[@]} == 0 )); then
-      echo "   ⚠️  No protected tags matched prefix '${DERIVED_PREFIX}-' — skipping deletion for safety"
+      echo "   ⚠️  No protected tags found in map for '${ACR_REPO}::${DERIVED_PREFIX}' — skipping deletion for safety"
       echo
       continue
     fi
@@ -453,6 +456,56 @@ cleanup_for_mode() {
   echo "✅ Finished ${MODE}-like simulated cleanup for k8s branch '${K8S_BRANCH}'."
   echo
 }
+
+# Pre-built map of all protected tags per (acr_repo, prefix) across ALL CSV rows.
+# Written to PROTECTED_MAP_FILE (one line per entry: "<acr_repo>::<prefix> <tag>").
+# Bash 3.2-compatible replacement for declare -A.
+build_protected_tags_map() {
+  echo "🔍 Pre-scanning all CSV rows to build cross-row protection map..."
+  local LAST_GH_REPO="" branch bmode values_path tag prefix map_key
+
+  while IFS=',' read -r GH_REPO ACR_REPO CHART_DIR PROD_PREFIX DEV_PREFIX; do
+    GH_REPO="${GH_REPO//[$'\r\t ']/}"
+    ACR_REPO="${ACR_REPO//[$'\r\t ']/}"
+    CHART_DIR="${CHART_DIR//[$'\r\t ']/}"
+
+    if [[ -z "$GH_REPO" ]]; then
+      [[ -z "$LAST_GH_REPO" ]] && continue
+      GH_REPO="$LAST_GH_REPO"
+    else
+      LAST_GH_REPO="$GH_REPO"
+    fi
+
+    [[ -z "$ACR_REPO$CHART_DIR" ]] && continue
+
+    for branch in "$K8S_BRANCH_DEVLIKE" "$K8S_BRANCH_DEV_EASTUS" "$K8S_BRANCH_PRODLIKE"; do
+      bmode="dev"
+      [[ "$branch" == "$K8S_BRANCH_PRODLIKE" ]] && bmode="prod"
+
+      values_path="$(find_values_file_for_mode_in_ref "$CHART_DIR" "$bmode" "origin/${branch}" || true)"
+      [[ -z "$values_path" ]] && continue
+
+      tag="$(read_current_tag_from_ref "origin/${branch}" "$values_path")"
+      [[ -z "$tag" ]] && continue
+
+      prefix="$(derive_prefix_from_tag "$tag")"
+      [[ -z "$prefix" ]] && continue
+
+      map_key="${ACR_REPO}::${prefix}"
+      # Append only if this exact key+tag pair isn't already recorded
+      grep -qF "${map_key} ${tag}" "$PROTECTED_MAP_FILE" 2>/dev/null \
+        || echo "${map_key} ${tag}" >> "$PROTECTED_MAP_FILE"
+    done
+  done < <(tail -n +2 "$MAP_FILE")
+
+  local num_keys
+  num_keys="$(awk '{print $1}' "$PROTECTED_MAP_FILE" | sort -u | wc -l | tr -d ' ')"
+  echo "   ✅ Protection map built (${num_keys} acr_repo::prefix entries)"
+  echo
+}
+
+# Build the cross-row protection map once (before any cleanup runs)
+build_protected_tags_map
 
 case "$CHOICE" in
   1) cleanup_for_mode "dev"  "$K8S_BRANCH_DEVLIKE" ;;
